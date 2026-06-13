@@ -1,0 +1,441 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>ONEIROS — the machine is dreaming</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;1,300&family=Space+Grotesk:wght@300;400&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --ink:#e9e4f2;
+    --dim:rgba(233,228,242,.42);
+    --faint:rgba(233,228,242,.18);
+  }
+  *{margin:0;padding:0;box-sizing:border-box}
+  html,body{height:100%;overflow:hidden;background:#05030c}
+  body{font-family:'Space Grotesk',system-ui,sans-serif;color:var(--ink);
+       -webkit-user-select:none;user-select:none;cursor:crosshair}
+  canvas#gl{position:fixed;inset:0;width:100vw;height:100vh;display:block}
+
+  .ui{position:fixed;inset:0;pointer-events:none;z-index:2;
+      transition:opacity 1.6s ease}
+  .ui.sleep{opacity:.12}
+
+  .wordmark{position:absolute;top:34px;left:38px}
+  .wordmark h1{
+    font-family:'Cormorant Garamond',serif;font-weight:300;
+    font-size:clamp(22px,2.6vw,34px);letter-spacing:.62em;
+    text-indent:.62em;color:var(--ink)}
+  .wordmark p{
+    margin-top:10px;font-size:11px;font-weight:300;letter-spacing:.22em;
+    text-transform:uppercase;color:var(--dim)}
+
+  .hints{position:absolute;bottom:34px;left:50%;transform:translateX(-50%);
+    display:flex;gap:34px;font-size:10.5px;letter-spacing:.24em;
+    text-transform:uppercase;color:var(--dim);white-space:nowrap}
+  .hints b{font-weight:400;color:var(--ink);margin-right:.6em}
+
+  .depth{position:absolute;bottom:34px;left:38px;font-size:11px;
+    letter-spacing:.28em;color:var(--faint)}
+  .depth span{color:var(--dim)}
+
+  .sound{position:absolute;top:38px;right:38px;pointer-events:auto;
+    background:none;border:1px solid var(--faint);color:var(--dim);
+    font-family:inherit;font-size:10.5px;letter-spacing:.26em;
+    text-transform:uppercase;padding:10px 18px 9px 22px;cursor:pointer;
+    border-radius:999px;transition:all .5s ease;backdrop-filter:blur(2px)}
+  .sound:hover{color:var(--ink);border-color:var(--dim)}
+  .sound.on{color:var(--ink);border-color:rgba(233,228,242,.5);
+    box-shadow:0 0 24px rgba(168,130,255,.25)}
+
+  .veil{position:fixed;inset:0;background:#05030c;z-index:5;
+    display:flex;align-items:center;justify-content:center;
+    flex-direction:column;gap:18px;transition:opacity 2.4s ease;
+    pointer-events:none}
+  .veil h2{font-family:'Cormorant Garamond',serif;font-weight:300;
+    font-style:italic;font-size:clamp(18px,2.2vw,26px);
+    letter-spacing:.14em;color:var(--dim)}
+  .veil.gone{opacity:0}
+
+  .err{position:fixed;inset:0;display:none;align-items:center;justify-content:center;
+    z-index:9;text-align:center;padding:24px;font-size:13px;letter-spacing:.08em;
+    color:var(--dim);line-height:2}
+
+  @media (max-width:640px){
+    .wordmark{top:24px;left:22px}
+    .sound{top:26px;right:22px}
+    .depth{display:none}
+    .hints{gap:18px;font-size:9px;bottom:24px}
+  }
+  @media (prefers-reduced-motion:reduce){
+    .veil{transition:opacity .4s ease}
+  }
+</style>
+</head>
+<body>
+
+<canvas id="gl"></canvas>
+
+<div class="veil" id="veil">
+  <h2>close the distance between waking and this</h2>
+</div>
+
+<div class="ui" id="ui">
+  <div class="wordmark">
+    <h1>ONEIROS</h1>
+    <p>the machine is dreaming &mdash; you are inside it</p>
+  </div>
+  <button class="sound" id="sound">&#10022;&nbsp;&nbsp;sound</button>
+  <div class="depth">DEPTH&nbsp;&nbsp;<span id="depth">0000.0</span></div>
+  <div class="hints">
+    <div><b>drift</b>move</div>
+    <div><b>pulse</b>tap</div>
+    <div><b>descend</b>hold</div>
+  </div>
+</div>
+
+<div class="err" id="err">
+  This dream needs WebGL to exist.<br>
+  Your browser declined &mdash; try Chrome, Safari, or Firefox with hardware acceleration on.
+</div>
+
+<script>
+(function(){
+"use strict";
+
+/* ------------------------------ WebGL setup ------------------------------ */
+const canvas = document.getElementById('gl');
+const gl = canvas.getContext('webgl', {antialias:false, alpha:false, powerPreference:'high-performance'})
+        || canvas.getContext('experimental-webgl');
+if(!gl){ document.getElementById('err').style.display='flex'; return; }
+
+const VERT = `
+attribute vec2 aPos;
+void main(){ gl_Position = vec4(aPos, 0.0, 1.0); }
+`;
+
+const FRAG = `
+precision highp float;
+
+uniform vec2  uRes;
+uniform float uTime;     // ambient clock
+uniform float uTravel;   // integrated distance (hold to accelerate)
+uniform vec2  uMouse;    // -1..1, smoothed
+uniform float uDive;     // 0..1, smoothed
+uniform float uNow;      // wall clock for pulses
+uniform vec4  uPulse[6]; // xy: origin (aspect uv), z: birth time, w: strength
+
+mat2 rot(float a){ float c = cos(a), s = sin(a); return mat2(c,-s,s,c); }
+
+float hash(vec3 p){
+  p = fract(p*0.3183099 + vec3(0.71,0.113,0.419));
+  p *= 17.0;
+  return fract(p.x*p.y*p.z*(p.x+p.y+p.z));
+}
+
+float noise(vec3 x){
+  vec3 i = floor(x), f = fract(x);
+  f = f*f*(3.0-2.0*f);
+  return mix(mix(mix(hash(i+vec3(0,0,0)), hash(i+vec3(1,0,0)), f.x),
+                 mix(hash(i+vec3(0,1,0)), hash(i+vec3(1,1,0)), f.x), f.y),
+             mix(mix(hash(i+vec3(0,0,1)), hash(i+vec3(1,0,1)), f.x),
+                 mix(hash(i+vec3(0,1,1)), hash(i+vec3(1,1,1)), f.x), f.y), f.z);
+}
+
+float fbm(vec3 p){
+  float a = 0.55, s = 0.0;
+  for(int i=0;i<5;i++){
+    s += a*noise(p);
+    p = p*2.04 + vec3(1.73, 0.97, 2.31);
+    a *= 0.52;
+  }
+  return s;
+}
+
+vec3 pal(float t){
+  return vec3(0.43,0.36,0.49)
+       + vec3(0.55,0.49,0.56)*cos(6.28318*(t + vec3(0.62,0.41,0.16)));
+}
+
+void main(){
+  vec2 uv = (gl_FragCoord.xy*2.0 - uRes) / min(uRes.x, uRes.y);
+
+  /* shockwave ripples from taps: space itself bends */
+  for(int i=0;i<6;i++){
+    vec4 P = uPulse[i];
+    float age = uNow - P.z;
+    if(P.w > 0.0 && age > 0.0 && age < 5.0){
+      vec2 d = uv - P.xy;
+      float r = length(d) + 1e-4;
+      float wave = sin(r*20.0 - age*8.0) * exp(-age*1.25) * exp(-r*1.4);
+      uv += (d/r) * wave * 0.05 * P.w;
+    }
+  }
+
+  float tm = uTime;
+  vec3 ro = vec3(0.0, 0.0, uTravel);
+  vec3 rd = normalize(vec3(uv + uMouse*0.16, 1.35 - uDive*0.38));
+  rd.xy *= rot(sin(tm*0.05)*0.16 + uMouse.x*0.12);
+
+  vec3 col = vec3(0.0);
+  float t = 0.12;
+  float occl = 0.0;
+
+  for(int i=0;i<68;i++){
+    vec3 p = ro + rd*t;
+
+    /* the vortex: rotation tightens toward the axis */
+    vec2 q = p.xy;
+    float rr = length(q) + 0.16;
+    q *= rot(1.05/rr + tm*0.12);
+    vec3 w = vec3(q, p.z);
+
+    float den = fbm(w*0.62 + vec3(0.0, 0.0, tm*0.045));
+    den = pow(max(den - 0.16, 0.0), 1.4);
+    occl += den;
+
+    vec3 c = pal(den*1.7 + p.z*0.05 + rr*0.22 - uDive*0.18);
+
+    float core = 0.016 / (0.022 + rr*rr*0.55);
+    col += (c*den*0.78 + vec3(1.0,0.86,0.62)*core*0.05)
+           * exp(-t*0.165) * 0.062;
+
+    t += 0.115 + den*0.05;
+  }
+
+  /* far stars, occluded by the dream itself */
+  vec3 srd = rd; srd.xy *= rot(tm*0.01);
+  float star = pow(hash(floor(srd*230.0)), 60.0);
+  star *= 0.6 + 0.4*sin(tm*2.0 + hash(floor(srd*230.0)+7.0)*40.0);
+  col += vec3(0.7,0.78,1.0) * star * 0.6 * exp(-occl*0.6);
+
+  /* descent fever: the deeper you go, the warmer the edge of vision */
+  float edge = length(uv);
+  col += pal(tm*0.02 + 0.5) * uDive * edge * 0.06;
+
+  /* tone map, vignette, breath */
+  col = 1.0 - exp(-col*2.3);
+  col = pow(col, vec3(0.92));
+  col *= 1.0 - 0.32*edge*edge;
+  col *= 0.97 + 0.03*sin(tm*0.4);
+
+  /* grain so it never looks like a screenshot */
+  col += (hash(vec3(gl_FragCoord.xy, fract(tm)*61.0)) - 0.5) * 0.035;
+
+  gl_FragColor = vec4(col, 1.0);
+}
+`;
+
+function makeShader(type, src){
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src); gl.compileShader(s);
+  if(!gl.getShaderParameter(s, gl.COMPILE_STATUS)){
+    console.error(gl.getShaderInfoLog(s));
+    document.getElementById('err').style.display='flex';
+    throw new Error('shader');
+  }
+  return s;
+}
+
+const prog = gl.createProgram();
+gl.attachShader(prog, makeShader(gl.VERTEX_SHADER, VERT));
+gl.attachShader(prog, makeShader(gl.FRAGMENT_SHADER, FRAG));
+gl.linkProgram(prog);
+if(!gl.getProgramParameter(prog, gl.LINK_STATUS)){
+  console.error(gl.getProgramInfoLog(prog));
+  document.getElementById('err').style.display='flex'; return;
+}
+gl.useProgram(prog);
+
+const buf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 3,-1, -1,3]), gl.STATIC_DRAW);
+const loc = gl.getAttribLocation(prog, 'aPos');
+gl.enableVertexAttribArray(loc);
+gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+
+const U = {};
+['uRes','uTime','uTravel','uMouse','uDive','uNow','uPulse'].forEach(n=>{
+  U[n] = gl.getUniformLocation(prog, n);
+});
+
+/* ------------------------------ state ------------------------------ */
+const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+const TIMESCALE = reduced ? 0.18 : 1.0;
+
+let W=0, H=0, scale=1;
+function resize(){
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  scale = (W*H > 0 && lowPower) ? 0.6 : Math.min(dpr, 1.6);
+  W = canvas.width  = Math.round(innerWidth  * scale);
+  H = canvas.height = Math.round(innerHeight * scale);
+  gl.viewport(0,0,W,H);
+}
+let lowPower = false;
+addEventListener('resize', resize); resize();
+
+let mouse = {x:0, y:0}, smHouse = {x:0, y:0};
+let diveTarget = 0, dive = 0;
+let travel = 0, dreamTime = 0;
+const pulses = new Float32Array(24); // 6 * vec4
+let pulseIdx = 0;
+
+function toAspect(cx, cy){
+  const m = Math.min(innerWidth, innerHeight);
+  return [ (cx*2 - innerWidth)/m, -(cy*2 - innerHeight)/m ];
+}
+
+/* ------------------------------ input ------------------------------ */
+const ui = document.getElementById('ui');
+let idleTimer = null;
+function wake(){
+  ui.classList.remove('sleep');
+  clearTimeout(idleTimer);
+  idleTimer = setTimeout(()=>ui.classList.add('sleep'), 5000);
+}
+wake();
+
+addEventListener('pointermove', e=>{
+  mouse.x = (e.clientX/innerWidth)*2 - 1;
+  mouse.y = -((e.clientY/innerHeight)*2 - 1);
+  wake();
+});
+
+let downAt = 0, holdTimer = null, pointerIsDown = false;
+addEventListener('pointerdown', e=>{
+  if(e.target.closest('.sound')) return;
+  pointerIsDown = true;
+  downAt = performance.now();
+  holdTimer = setTimeout(()=>{ if(pointerIsDown) diveTarget = 1; }, 180);
+  wake();
+});
+addEventListener('pointerup', e=>{
+  if(!pointerIsDown) return;
+  pointerIsDown = false;
+  clearTimeout(holdTimer);
+  diveTarget = 0;
+  if(performance.now() - downAt < 220 && !e.target.closest('.sound')){
+    firePulse(e.clientX, e.clientY);
+  }
+});
+addEventListener('pointercancel', ()=>{ pointerIsDown=false; diveTarget=0; clearTimeout(holdTimer); });
+
+function firePulse(cx, cy){
+  const [ax, ay] = toAspect(cx, cy);
+  const o = pulseIdx*4;
+  pulses[o]=ax; pulses[o+1]=ay; pulses[o+2]=nowSec(); pulses[o+3]=1.0;
+  pulseIdx = (pulseIdx+1) % 6;
+  ping();
+}
+
+/* ------------------------------ audio ------------------------------ */
+let actx=null, master=null, soundOn=false;
+const soundBtn = document.getElementById('sound');
+
+function buildDrone(){
+  actx = new (window.AudioContext||window.webkitAudioContext)();
+  master = actx.createGain(); master.gain.value = 0;
+
+  const lp = actx.createBiquadFilter();
+  lp.type='lowpass'; lp.frequency.value=640; lp.Q.value=0.4;
+
+  const delay = actx.createDelay(2.0); delay.delayTime.value=0.42;
+  const fb = actx.createGain(); fb.gain.value=0.42;
+  delay.connect(fb); fb.connect(delay);
+
+  lp.connect(master);
+  lp.connect(delay); delay.connect(master);
+  master.connect(actx.destination);
+
+  [[55,0],[82.41,3],[110,-4],[164.81,2]].forEach(([f,det],i)=>{
+    const o = actx.createOscillator();
+    o.type = i%2 ? 'triangle' : 'sine';
+    o.frequency.value = f; o.detune.value = det;
+    const g = actx.createGain(); g.gain.value = i===0 ? 0.16 : 0.08;
+    const lfo = actx.createOscillator(); lfo.frequency.value = 0.05 + i*0.021;
+    const lfoG = actx.createGain(); lfoG.gain.value = 4 + i*2;
+    lfo.connect(lfoG); lfoG.connect(o.detune);
+    o.connect(g); g.connect(lp);
+    o.start(); lfo.start();
+  });
+  buildDrone.lp = lp;
+}
+
+function ping(){
+  if(!soundOn || !actx) return;
+  const o = actx.createOscillator();
+  o.type='sine';
+  o.frequency.value = [329.63, 392, 440, 523.25][Math.floor(Math.random()*4)];
+  const g = actx.createGain();
+  g.gain.setValueAtTime(0.0001, actx.currentTime);
+  g.gain.exponentialRampToValueAtTime(0.12, actx.currentTime+0.02);
+  g.gain.exponentialRampToValueAtTime(0.0001, actx.currentTime+1.6);
+  o.connect(g); g.connect(buildDrone.lp);
+  o.start(); o.stop(actx.currentTime+1.8);
+}
+
+soundBtn.addEventListener('click', ()=>{
+  if(!actx) buildDrone();
+  if(actx.state==='suspended') actx.resume();
+  soundOn = !soundOn;
+  const t = actx.currentTime;
+  master.gain.cancelScheduledValues(t);
+  master.gain.setTargetAtTime(soundOn ? 0.16 : 0.0, t, 1.2);
+  soundBtn.classList.toggle('on', soundOn);
+  soundBtn.innerHTML = soundOn ? '&#10022;&nbsp;&nbsp;dreaming aloud' : '&#10022;&nbsp;&nbsp;sound';
+});
+
+/* ------------------------------ loop ------------------------------ */
+const t0 = performance.now();
+function nowSec(){ return (performance.now()-t0)/1000; }
+
+const depthEl = document.getElementById('depth');
+let last = nowSec(), frames=0, slowFrames=0, lastFPSCheck=last;
+
+function frame(){
+  const now = nowSec();
+  let dt = Math.min(now-last, 0.05);
+  last = now;
+
+  /* adaptive resolution: if the dream stutters, soften it */
+  frames++;
+  if(now - lastFPSCheck > 2){
+    const fps = frames/(now-lastFPSCheck);
+    if(fps < 28 && !lowPower){ lowPower=true; resize(); }
+    frames=0; lastFPSCheck=now;
+  }
+
+  dt *= TIMESCALE;
+  dreamTime += dt;
+
+  smHouse.x += (mouse.x - smHouse.x)*0.04;
+  smHouse.y += (mouse.y - smHouse.y)*0.04;
+  dive += (diveTarget - dive)*0.035;
+  travel += dt * (0.55 + dive*2.6);
+
+  gl.uniform2f(U.uRes, W, H);
+  gl.uniform1f(U.uTime, dreamTime);
+  gl.uniform1f(U.uTravel, travel);
+  gl.uniform2f(U.uMouse, smHouse.x, smHouse.y);
+  gl.uniform1f(U.uDive, dive);
+  gl.uniform1f(U.uNow, now);
+  gl.uniform4fv(U.uPulse, pulses);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+  depthEl.textContent = (travel*10).toFixed(1).padStart(6,'0');
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+/* lift the veil */
+setTimeout(()=>{
+  const v = document.getElementById('veil');
+  v.classList.add('gone');
+  setTimeout(()=>v.remove(), 2600);
+}, 900);
+
+})();
+</script>
+</body>
+</html>

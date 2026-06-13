@@ -1,0 +1,501 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>EVERSONG — a song that has never existed</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  html,body{height:100%;overflow:hidden;background:#030308;touch-action:none;overscroll-behavior:none}
+  body{font-family:'Helvetica Neue',Arial,system-ui,sans-serif;color:#efeaf6;
+    -webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent;cursor:crosshair}
+  canvas{position:fixed;inset:0;width:100vw;height:100vh;display:block;touch-action:none}
+  .gate{position:fixed;inset:0;z-index:10;display:flex;flex-direction:column;
+    align-items:center;justify-content:center;gap:22px;background:#030308;
+    transition:opacity 1.8s ease;cursor:pointer}
+  .gate.gone{opacity:0;pointer-events:none}
+  .gate h1{font-weight:200;font-size:clamp(26px,4vw,40px);letter-spacing:.55em;text-indent:.55em}
+  .gate p{font-size:11px;letter-spacing:.3em;text-transform:uppercase;opacity:.5}
+  .gate .ring{width:74px;height:74px;border:1px solid rgba(239,234,246,.35);border-radius:50%;
+    display:flex;align-items:center;justify-content:center;font-size:10px;letter-spacing:.2em;
+    animation:pulse 2.2s ease-in-out infinite}
+  @keyframes pulse{0%,100%{transform:scale(1);opacity:.6}50%{transform:scale(1.12);opacity:1}}
+  .hud{position:fixed;inset:0;pointer-events:none;z-index:5;transition:opacity 1.4s ease}
+  .hud.dim{opacity:.25}
+  .mark{position:absolute;top:24px;left:26px}
+  .mark h2{font-weight:200;font-size:16px;letter-spacing:.5em}
+  .mark p{margin-top:6px;font-size:9.5px;letter-spacing:.22em;text-transform:uppercase;opacity:.45}
+  .stat{position:absolute;top:26px;right:26px;text-align:right;font-size:10px;
+    letter-spacing:.22em;text-transform:uppercase;opacity:.55;line-height:2}
+  .hint{position:absolute;bottom:26px;left:50%;transform:translateX(-50%);
+    font-size:10px;letter-spacing:.3em;text-transform:uppercase;opacity:.4;white-space:nowrap}
+  .meters{position:absolute;bottom:26px;left:26px;display:flex;gap:14px;align-items:flex-end}
+  .mcol{display:flex;flex-direction:column;align-items:center;gap:6px}
+  .mcol b{font-weight:300;font-size:8.5px;letter-spacing:.18em;opacity:.55}
+  .meter{width:11px;height:86px;border:1px solid rgba(239,234,246,.3);border-radius:6px;
+    position:relative;overflow:hidden}
+  .meter i{position:absolute;left:0;right:0;bottom:0;height:50%;display:block;
+    background:linear-gradient(to top,rgba(239,234,246,.85),rgba(239,234,246,.4))}
+  .inflash{font-size:9px;letter-spacing:.22em;opacity:0;color:#fff;padding-bottom:34px}
+  @media(max-width:640px){.hint{display:none}}
+  @media(max-width:640px){.mark{top:18px;left:18px}.stat{top:20px;right:18px}}
+</style>
+</head>
+<body>
+<canvas id="cv"></canvas>
+
+<div class="gate" id="gate">
+  <h1>EVERSONG</h1>
+  <p>a song that has never existed &mdash; and will never repeat</p>
+  <div class="ring">BEGIN</div>
+</div>
+
+<div class="hud dim" id="hud">
+  <div class="mark"><h2>EVERSONG</h2><p id="keyline">composing&hellip;</p></div>
+  <div class="stat" id="stat"></div>
+  <div class="meters">
+    <div class="mcol"><div class="meter"><i id="mE"></i></div><b>ENERGY</b></div>
+    <div class="mcol"><div class="meter"><i id="mB"></i></div><b>BRIGHT</b></div>
+    <div class="inflash" id="inflash">INPUT &#10003;</div>
+  </div>
+  <div class="hint">press and drag &mdash; hold at the bottom to hush, at the top to lift. the meters prove it.</div>
+</div>
+
+<script>
+(function(){
+"use strict";
+
+/* ════════════════════════════ MUSIC THEORY ════════════════════════════ */
+const NOTE_NAMES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+const MODES = {
+  aeolian:{name:'aeolian', steps:[0,2,3,5,7,8,10], mood:'midnight'},
+  dorian:{name:'dorian', steps:[0,2,3,5,7,9,10], mood:'dawn'},
+};
+/* chord graph over scale degrees (0-indexed): weighted transitions */
+const PROG = {
+  0:[[5,3],[2,2],[6,2],[3,2]],   // i  -> VI, III, VII, iv
+  5:[[3,3],[6,2],[0,2],[2,1]],   // VI -> iv, VII, i, III
+  2:[[6,3],[5,2],[3,2]],         // III-> VII, VI, iv
+  6:[[0,4],[5,2],[3,1]],         // VII-> i, VI, iv
+  3:[[0,3],[6,2],[4,2]],         // iv -> i, VII, v
+  4:[[0,4],[5,2]],               // v  -> i, VI
+};
+function pick(list){
+  let total=0; for(const [,w] of list) total+=w;
+  let r=Math.random()*total;
+  for(const [v,w] of list){ r-=w; if(r<=0) return v; }
+  return list[0][0];
+}
+const root = 45 + Math.floor(Math.random()*8);              // A2..E3 region
+const mode = Math.random()<0.5 ? MODES.aeolian : MODES.dorian;
+const midi = f => 440*Math.pow(2,(f-69)/12);
+const deg = (d,oct)=> midi(root + mode.steps[((d%7)+7)%7] + 12*(oct + Math.floor(d/7)));
+/* pentatonic subset of the mode for melodies (degrees that always sing) */
+const PENTA = mode===MODES.aeolian ? [0,2,3,4,6] : [0,1,2,4,5];
+
+/* motif: a phrase the melody keeps returning to, mutated over time */
+function makeMotif(){
+  const m=[]; let cur=4+Math.floor(Math.random()*3);
+  for(let i=0;i<8;i++){
+    if(Math.random()<0.3) m.push(null);                      // rest
+    else { cur += [-2,-1,-1,0,1,1,2][Math.floor(Math.random()*7)];
+           cur = Math.max(2, Math.min(9, cur)); m.push(cur); }
+  }
+  if(m.every(x=>x===null)) m[0]=4;
+  return m;
+}
+function mutate(motif){
+  const m = motif.slice();
+  const i = Math.floor(Math.random()*m.length);
+  if(Math.random()<0.5 && m[i]!==null) m[i]+= (Math.random()<0.5?-1:1);
+  else m[i] = Math.random()<0.3 ? null : 3+Math.floor(Math.random()*6);
+  return m;
+}
+
+/* ════════════════════════════ AUDIO ENGINE ════════════════════════════ */
+let ctx=null, master, comp, reverb, revGain, delay, delGain, padBus, padFilter, anal;
+let analData;
+const BPM = 76 + Math.floor(Math.random()*16);
+const SPB = 60/BPM;            // seconds per beat
+const STEP = SPB/2;            // 8th notes
+
+function makeImpulse(seconds, decay){
+  const rate = ctx.sampleRate, len = rate*seconds;
+  const buf = ctx.createBuffer(2, len, rate);
+  for(let ch=0; ch<2; ch++){
+    const d = buf.getChannelData(ch);
+    for(let i=0;i<len;i++){
+      d[i] = (Math.random()*2-1) * Math.pow(1-i/len, decay);
+    }
+  }
+  return buf;
+}
+
+function buildRack(){
+  ctx = new (window.AudioContext||window.webkitAudioContext)();
+  master = ctx.createGain(); master.gain.value = 0.0;
+  comp = ctx.createDynamicsCompressor();
+  comp.threshold.value=-18; comp.knee.value=24; comp.ratio.value=4;
+  comp.attack.value=0.004; comp.release.value=0.24;
+
+  anal = ctx.createAnalyser(); anal.fftSize = 512; anal.smoothingTimeConstant = 0.82;
+  analData = new Uint8Array(anal.frequencyBinCount);
+
+  reverb = ctx.createConvolver(); reverb.buffer = makeImpulse(3.2, 2.6);
+  revGain = ctx.createGain(); revGain.gain.value = 0.42;
+  delay = ctx.createDelay(2.0); delay.delayTime.value = STEP*3;     // dotted 8th
+  delGain = ctx.createGain(); delGain.gain.value = 0.34;
+  const delFB = ctx.createGain(); delFB.gain.value = 0.38;
+  delay.connect(delFB); delFB.connect(delay);
+
+  padFilter = ctx.createBiquadFilter();
+  padFilter.type='lowpass'; padFilter.frequency.value=900; padFilter.Q.value=0.6;
+  padBus = ctx.createGain(); padBus.gain.value=1.0;
+  padBus.connect(padFilter); padFilter.connect(comp);
+  padFilter.connect(revGain);
+
+  revGain.connect(reverb); reverb.connect(comp);
+  delGain.connect(delay); delay.connect(comp); delay.connect(revGain);
+
+  comp.connect(anal); anal.connect(master); master.connect(ctx.destination);
+  master.gain.setTargetAtTime(0.9, ctx.currentTime, 1.2);
+}
+
+/* ---- voices ---- */
+function envGain(t, a, peak, d, sustain, dest){
+  const g = ctx.createGain();
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.exponentialRampToValueAtTime(Math.max(peak,0.0002), t+a);
+  g.gain.exponentialRampToValueAtTime(Math.max(sustain,0.0001), t+a+d);
+  g.connect(dest);
+  return g;
+}
+function killAt(g, t, rel){
+  g.gain.setTargetAtTime(0.0001, t, rel/4);
+}
+
+function padChord(freqs, t, dur, vel){
+  for(const f of freqs){
+    for(const det of [-6, 5]){
+      const o = ctx.createOscillator();
+      o.type='sawtooth'; o.frequency.value=f; o.detune.value=det + (Math.random()*4-2);
+      const g = envGain(t, dur*0.35, 0.05*vel, dur*0.2, 0.035*vel, padBus);
+      killAt(g, t+dur*0.92, dur*0.5);
+      o.connect(g); o.start(t); o.stop(t+dur+2.5);
+    }
+  }
+}
+function pluck(f, t, vel){
+  const o = ctx.createOscillator(); o.type='triangle'; o.frequency.value=f;
+  const o2 = ctx.createOscillator(); o2.type='sine'; o2.frequency.value=f*2; 
+  const g = envGain(t, 0.005, 0.16*vel, 0.18, 0.0001, comp);
+  const g2 = envGain(t, 0.003, 0.05*vel, 0.10, 0.0001, comp);
+  const send = ctx.createGain(); send.gain.value=0.8; g.connect(send); send.connect(delGain);
+  g.connect(revGain);
+  o.connect(g); o2.connect(g2);
+  o.start(t); o.stop(t+1.2); o2.start(t); o2.stop(t+0.8);
+}
+function bass(f, t, dur, vel){
+  const o = ctx.createOscillator(); o.type='sine'; o.frequency.value=f/2;
+  const o2 = ctx.createOscillator(); o2.type='sawtooth'; o2.frequency.value=f/2;
+  const fl = ctx.createBiquadFilter(); fl.type='lowpass'; fl.frequency.value=220;
+  const g = envGain(t, 0.01, 0.34*vel, dur*0.5, 0.18*vel, comp);
+  killAt(g, t+dur*0.85, 0.2);
+  o.connect(g); o2.connect(fl); fl.connect(g);
+  o.start(t); o.stop(t+dur+0.5); o2.start(t); o2.stop(t+dur+0.5);
+}
+function kick(t, vel){
+  const o = ctx.createOscillator(); o.type='sine';
+  o.frequency.setValueAtTime(150, t);
+  o.frequency.exponentialRampToValueAtTime(38, t+0.12);
+  const g = envGain(t, 0.002, 0.85*vel, 0.16, 0.0001, comp);
+  o.connect(g); o.start(t); o.stop(t+0.4);
+  onBeatVisual(t, vel);
+}
+function noiseBuf(){
+  if(noiseBuf.b) return noiseBuf.b;
+  const b = ctx.createBuffer(1, ctx.sampleRate*1, ctx.sampleRate);
+  const d = b.getChannelData(0);
+  for(let i=0;i<d.length;i++) d[i]=Math.random()*2-1;
+  return noiseBuf.b=b;
+}
+function hat(t, vel, open){
+  const s = ctx.createBufferSource(); s.buffer=noiseBuf();
+  const f = ctx.createBiquadFilter(); f.type='highpass'; f.frequency.value=7600;
+  const g = envGain(t, 0.001, 0.10*vel, open?0.22:0.045, 0.0001, comp);
+  s.connect(f); f.connect(g); s.start(t); s.stop(t+0.3);
+}
+function snare(t, vel){
+  const s = ctx.createBufferSource(); s.buffer=noiseBuf();
+  const f = ctx.createBiquadFilter(); f.type='bandpass'; f.frequency.value=1900; f.Q.value=0.8;
+  const g = envGain(t, 0.001, 0.30*vel, 0.13, 0.0001, comp);
+  g.connect(revGain);
+  s.connect(f); f.connect(g); s.start(t); s.stop(t+0.3);
+}
+
+/* ════════════════════════ COMPOSER / SCHEDULER ════════════════════════ */
+let degree = 0;
+let motif = makeMotif();
+let stepIndex = 0;            // 8th-note counter
+let nextTime = 0;
+let energy = 0.55;            // conducted: 0..1
+let targetEnergy = 0.55;
+let bright = 0.5, targetBright = 0.5;
+let chordFreqs = [];
+let chordFlash = 0;
+let barOfSection = 0;
+let section = 'rise';         // rise -> peak -> hush -> rise ...
+const SECTION_BARS = {rise:12, peak:16, hush:8};
+let sectionEnergyBias = 0;
+
+const visualNotes = [];       // {t, hue, x, y, big}
+let beatPulse = {t:0, v:0};
+function onBeatVisual(t, v){ beatPulse = {t, v}; }
+
+function currentChord(){
+  /* voice-led: root, third, fifth, seventh, spread over octaves */
+  return [deg(degree,1), deg(degree+2,1), deg(degree+4,1), deg(degree+6,2)];
+}
+
+function advanceSection(){
+  barOfSection++;
+  if(section==='rise' && barOfSection>=SECTION_BARS.rise){ section='peak'; barOfSection=0; }
+  else if(section==='peak' && barOfSection>=SECTION_BARS.peak){ section='hush'; barOfSection=0; }
+  else if(section==='hush' && barOfSection>=SECTION_BARS.hush){ section='rise'; barOfSection=0; motif=makeMotif(); }
+  sectionEnergyBias = section==='peak' ? 0.22 : section==='hush' ? -0.34 : 0;
+}
+
+function scheduleStep(t){
+  const e = Math.max(0, Math.min(1, energy*0.95 + sectionEnergyBias*0.5));
+  const beat = stepIndex % 8;          // position within a 4-beat bar (8th notes)
+  const bar  = Math.floor(stepIndex/8);
+
+  /* chord changes every 2 bars */
+  if(stepIndex % 16 === 0){
+    degree = pick(PROG[degree] || [[0,1]]);
+    chordFreqs = currentChord();
+    padChord(chordFreqs, t, SPB*8, 0.65 + e*0.5);
+    bass(chordFreqs[0], t, SPB*8, 0.8 + e*0.3);
+    chordFlash = 1;
+    if(stepIndex % 32 === 0 && Math.random()<0.5) motif = mutate(motif);
+  }
+
+  /* drums — density follows energy */
+  if(beat===0) kick(t, 0.7+e*0.4);
+  if(e>0.42 && beat===4) kick(t, 0.5+e*0.3);
+  if(e>0.3 && (beat===2||beat===6)) snare(t, 0.35+e*0.5);
+  if(e>0.18){
+    hat(t, 0.3+e*0.5, false);
+    if(e>0.62 && beat%2===1) hat(t+STEP/2, 0.18+e*0.25, false);
+  }
+  if(e>0.5 && beat===7) hat(t, 0.3+e*0.3, true);
+
+  /* melody — motif over pentatonic, register follows brightness */
+  const slot = motif[stepIndex % 8];
+  const play = slot!==null && (e>0.22 || beat%4===0);
+  if(play && section!=='hush' || (play && Math.random()<0.35)){
+    const oct = 2 + (bright>0.62 ? 1 : 0);
+    const f = deg(PENTA[slot % PENTA.length] + (slot>6?7:0), oct);
+    pluck(f, t, 0.5 + e*0.6);
+    visualNotes.push({t, f, hue:(degree*51 + (slot*23))%360, big:false});
+    /* harmony echo a 6th below at high energy */
+    if(e>0.7 && Math.random()<0.4){
+      pluck(deg(PENTA[slot%PENTA.length]-3, oct), t+STEP/2, 0.3);
+    }
+  }
+
+  /* bar boundary */
+  if(stepIndex % 8 === 7) advanceSection();
+  stepIndex++;
+}
+
+function schedulerTick(){
+  if(!ctx) return;
+  while(nextTime < ctx.currentTime + 0.12){
+    scheduleStep(nextTime);
+    nextTime += STEP;
+  }
+  /* conducted params glide — fast enough to feel like cause and effect */
+  energy += (targetEnergy-energy)*0.18;
+  bright += (targetBright-bright)*0.18;
+  const e = Math.max(0,Math.min(1, energy*0.95 + sectionEnergyBias*0.5));
+  padFilter.frequency.setTargetAtTime(300 + e*3400 + bright*1200, ctx.currentTime, 0.08);
+  padBus.gain.setTargetAtTime(0.40 + e*0.85, ctx.currentTime, 0.12);
+  revGain.gain.setTargetAtTime(0.28 + (1-e)*0.40, ctx.currentTime, 0.15);
+}
+
+/* ════════════════════════════ VISUALS ════════════════════════════ */
+const cv = document.getElementById('cv');
+const g2 = cv.getContext('2d');
+let W=0,H=0,DPR=1;
+function resize(){
+  DPR = Math.min(window.devicePixelRatio||1, 2);
+  W = cv.width = Math.round(innerWidth*DPR);
+  H = cv.height = Math.round(innerHeight*DPR);
+}
+addEventListener('resize', resize); resize();
+
+const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
+const orbs = [];
+for(let i=0;i<90;i++){
+  orbs.push({a:Math.random()*6.28, r:0.08+Math.random()*0.42,
+             sp:(0.0008+Math.random()*0.003)*(Math.random()<0.5?-1:1),
+             sz:0.6+Math.random()*1.8, tw:Math.random()*6.28});
+}
+const ripples = [];
+
+function hueForDegree(d){ return (d*52 + 230) % 360; }
+
+function draw(now){
+  const t = now/1000;
+  g2.fillStyle = 'rgba(3,3,8,0.16)';
+  g2.fillRect(0,0,W,H);
+  const cx=W/2, cy=H/2, R=Math.min(W,H);
+
+  let bassLvl=0, midLvl=0, hiLvl=0;
+  if(anal){
+    anal.getByteFrequencyData(analData);
+    const n = analData.length;
+    for(let i=0;i<8;i++) bassLvl+=analData[i];      bassLvl/=8*255;
+    for(let i=10;i<60;i++) midLvl+=analData[i];     midLvl/=50*255;
+    for(let i=70;i<160;i++) hiLvl+=analData[i];     hiLvl/=90*255;
+  }
+  const hue = hueForDegree(degree);
+  chordFlash *= 0.965;
+
+  /* breathing core — pumps with real bass */
+  const coreR = R*(0.055 + bassLvl*0.085 + chordFlash*0.02);
+  let grad = g2.createRadialGradient(cx,cy,0, cx,cy, coreR*4.2);
+  grad.addColorStop(0, `hsla(${hue},90%,${58+chordFlash*22}%,${0.55+bassLvl*0.4})`);
+  grad.addColorStop(0.35, `hsla(${(hue+40)%360},85%,45%,0.16)`);
+  grad.addColorStop(1, 'rgba(0,0,0,0)');
+  g2.fillStyle=grad;
+  g2.fillRect(0,0,W,H);
+
+  /* radial spectrum — the song's actual voiceprint */
+  if(anal){
+    const bars = 96;
+    g2.save(); g2.translate(cx,cy);
+    for(let i=0;i<bars;i++){
+      const v = analData[Math.floor(i/bars*150)]/255;
+      const a = (i/bars)*Math.PI*2 + t*0.05;
+      const r0 = coreR*1.5;
+      const len = v*v*R*0.22*(0.5+energy);
+      g2.strokeStyle = `hsla(${(hue + i*1.2)%360},85%,${50+v*30}%,${0.10+v*0.5})`;
+      g2.lineWidth = 2.2*DPR;
+      g2.beginPath();
+      g2.moveTo(Math.cos(a)*r0, Math.sin(a)*r0);
+      g2.lineTo(Math.cos(a)*(r0+len), Math.sin(a)*(r0+len));
+      g2.stroke();
+    }
+    g2.restore();
+  }
+
+  /* orbiting motes — agitated by mids */
+  for(const o of orbs){
+    o.a += o.sp*(1+midLvl*5)*(reduced?0.3:1);
+    const rr = o.r*R*(1+Math.sin(t*0.4+o.tw)*0.04);
+    const x = cx+Math.cos(o.a)*rr, y = cy+Math.sin(o.a)*rr*0.92;
+    const tw = 0.25+0.75*Math.abs(Math.sin(t*1.4+o.tw));
+    g2.fillStyle = `hsla(${(hue+60)%360},70%,75%,${(0.12+hiLvl*0.6)*tw})`;
+    g2.beginPath(); g2.arc(x,y,o.sz*DPR*(1+hiLvl*1.5),0,6.29); g2.fill();
+  }
+
+  /* note ripples — each melody note becomes a ring */
+  if(ctx){
+    while(visualNotes.length && visualNotes[0].t <= ctx.currentTime){
+      const n = visualNotes.shift();
+      const ang = (n.f % 360)/360*Math.PI*2;
+      const rad = R*0.18 + (n.f%200)/200*R*0.2;
+      ripples.push({x:cx+Math.cos(ang)*rad, y:cy+Math.sin(ang)*rad*0.9,
+                    r:4*DPR, hue:n.hue, life:1});
+    }
+  }
+  for(let i=ripples.length-1;i>=0;i--){
+    const rp = ripples[i];
+    rp.r += (1.4+energy*2.2)*DPR; rp.life -= 0.018;
+    if(rp.life<=0){ ripples.splice(i,1); continue; }
+    g2.strokeStyle = `hsla(${rp.hue},85%,68%,${rp.life*0.55})`;
+    g2.lineWidth = 1.6*DPR;
+    g2.beginPath(); g2.arc(rp.x,rp.y,rp.r,0,6.29); g2.stroke();
+  }
+
+  /* kick shock ring */
+  if(ctx && beatPulse.v>0){
+    const age = ctx.currentTime - beatPulse.t;
+    if(age>=0 && age<0.5){
+      const pr = coreR*1.4 + age*R*0.9;
+      g2.strokeStyle = `hsla(${hue},90%,70%,${(1-age*2)*0.35*beatPulse.v})`;
+      g2.lineWidth = 3*DPR*(1-age*1.6);
+      if(g2.lineWidth>0){ g2.beginPath(); g2.arc(cx,cy,pr,0,6.29); g2.stroke(); }
+    }
+  }
+
+  /* conductor trace */
+  if(pointerOn){
+    g2.fillStyle = `hsla(${hue},90%,80%,0.5)`;
+    g2.beginPath(); g2.arc(px*W, py*H, 5*DPR, 0, 6.29); g2.fill();
+    g2.strokeStyle = `hsla(${hue},90%,80%,0.18)`;
+    g2.lineWidth=1*DPR;
+    g2.beginPath(); g2.arc(px*W, py*H, 18*DPR + energy*26*DPR, 0, 6.29); g2.stroke();
+  }
+
+  /* proof meters — these move only when input registers */
+  inputGlow *= 0.94;
+  mE.style.height = Math.round(energy*100) + '%';
+  mB.style.height = Math.round(bright*100) + '%';
+  inflash.style.opacity = inputGlow.toFixed(2);
+
+  requestAnimationFrame(draw);
+}
+
+/* ════════════════════════════ CONDUCTING ════════════════════════════ */
+let px=0.5, py=0.5, pointerOn=false, inputGlow=0;
+const mE = document.getElementById('mE');
+const mB = document.getElementById('mB');
+const inflash = document.getElementById('inflash');
+function conduct(cx, cy){
+  px = cx/innerWidth; py = cy/innerHeight;
+  targetEnergy = 1 - py;                 // raise hand = lift the music
+  targetBright = px;                     // right = brighter register
+  inputGlow = 1;                         // visible proof the touch registered
+}
+addEventListener('pointerdown', e=>{ pointerOn=true; conduct(e.clientX, e.clientY); });
+addEventListener('pointermove', e=>{ if(pointerOn) conduct(e.clientX, e.clientY); });
+addEventListener('pointerup',   ()=>{ pointerOn=false; });
+addEventListener('pointercancel', ()=>{ pointerOn=false; });
+/* raw touch fallback — some webviews cancel pointer streams mid-drag */
+addEventListener('touchstart', e=>{ const t=e.touches[0]; pointerOn=true; conduct(t.clientX, t.clientY); e.preventDefault(); }, {passive:false});
+addEventListener('touchmove',  e=>{ const t=e.touches[0]; conduct(t.clientX, t.clientY); e.preventDefault(); }, {passive:false});
+addEventListener('touchend',   ()=>{ pointerOn=false; }, {passive:false});
+
+/* ════════════════════════════ BOOT ════════════════════════════ */
+const gate = document.getElementById('gate');
+const hud = document.getElementById('hud');
+const stat = document.getElementById('stat');
+const keyline = document.getElementById('keyline');
+let booted=false;
+
+function boot(){
+  if(booted) return; booted=true;
+  buildRack();
+  nextTime = ctx.currentTime + 0.1;
+  chordFreqs = currentChord();
+  setInterval(schedulerTick, 25);
+  keyline.textContent = `${NOTE_NAMES[root%12]} ${mode.name} · ${BPM} bpm · ${mode.mood}`;
+  gate.classList.add('gone');
+  setTimeout(()=>{ hud.classList.remove('dim'); }, 800);
+  setTimeout(()=>gate.remove(), 2000);
+  setInterval(()=>{
+    stat.innerHTML = `${section.toUpperCase()}<br>bar ${Math.floor(stepIndex/8)+1}`;
+  }, 400);
+}
+gate.addEventListener('pointerdown', boot);
+gate.addEventListener('touchstart', boot, {passive:true});
+gate.addEventListener('click', boot);
+
+requestAnimationFrame(draw);
+})();
+</script>
+</body>
+</html>
